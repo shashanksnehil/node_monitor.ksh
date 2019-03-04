@@ -1,0 +1,377 @@
+#!/bin/bash
+#Bash Menu Script
+USAGE="!!!! WARNING !!!! This script intend to run on Linux server As oracle"
+###Check if OS is linux#####
+OS=Linux
+COS=$(uname)
+if [ "$COS" != "$OS" ]
+        then
+        echo $USAGE
+exit 0;
+        else
+        echo "OS is Linux the script will continue"
+        sleep .5
+fi
+###check if USER is ORACLE####
+CORRECT_USER=oracle
+CONNECTED_USER="$USER"
+if [ "$CORRECT_USER" != "$CONNECTED_USER" ];
+        then
+        echo $USAGE
+#exit 0;
+        else
+        echo "USER is oracle script will continue"
+        sleep .5
+fi
+
+##############
+
+function OPTION5_FUN5
+{
+echo "the program will quit now"
+exit 0;
+}
+function OPTION4_FUN4
+{
+        echo "OPTION4_FUN4"
+}
+function OPTION3_FUN3
+{
+        echo "OPTION3_FUN3" ##Your script or sql to execute###
+}
+function OPTION2_FUN2
+{
+
+# Get the DB you're running it for, menu option
+#while [[ -z ${DB_SID} ]];do
+while true; do
+# get all the sids to list out, minus admin and ASM
+SID_LIST=$(ps -ef | grep pmon | grep -v "grep pmon" | sed 's:.*pmon_::' | grep -v "::" | grep -v ASM | grep -v asm | grep -v admin | grep -v ADMIN | grep -v taspmo)
+        if [[ $(echo ${#SID_LIST[@]} | wc -l) -eq 0 ]];then
+                export SID_LIST="Exit New_Instance"
+          else
+                export SID_LIST="${SID_LIST} Exit New_Instance"
+        fi
+
+        echo "|=====================|"
+        echo "|=== Select DB SID ===|"
+        echo "|=====================|"
+#        PS3='Select Instance: '
+printf "\n"
+echo  -e "######### Select Instance: #########\n\n"
+        select SID in ${SID_LIST};do
+                if [[ ${SID} == "Exit" ]];then
+                        exit
+                fi
+                if [[ ${SID} == "New_Instance" ]];then
+                        echo -e "Enter the Target DB Instance: \c"
+                        read DB_SID
+                        NOINST="YES"
+                        break
+                fi
+                DB_SID=${SID}
+                break
+        done
+break
+done
+sleep .1
+# Get DB_NAME from DB_SID
+DB_NAME=$(echo ${DB_SID} | tr '[a-z]' '[A-Z]' | rev | cut -c 2- | rev)
+
+# Get lower case db_name
+DB_NAME_LOWER=$(echo ${DB_NAME} | tr '[A-Z]' '[a-z]')
+
+#echo -e  "your DB_SID is $DB_SID \n\n"
+#echo -e "your DB_NAME is $DB_NAME \n\n"
+#echo -e "your db_name_lower is $DB_NAME_LOWER \n\n"
+
+PID=$(ps -ef | grep pmon | grep ${DB_SID} | awk '{print $2}')
+#echo $PID
+VAR=$(sudo pwdx ${PID}| awk -F': ' '{print $2}')
+#echo $VAR
+ORACLE_HOME=$(echo "${VAR%/*}")
+#echo $ORACLE_HOME
+ORACLE_SID=${DB_SID}
+#echo $ORACLE_SID
+export ORACLE_HOME=$ORACLE_HOME
+export ORACLE_SID=$ORACLE_SID
+${ORACLE_HOME}/bin/sqlplus -L -S  '/nolog' <<ENDSQL > /home/oracle/TEST_${DB_SID}.log 2>&1
+connect sys as sysdba;
+set echo on;
+col ORIGINATING_TIMESTAMP for a40
+col MESSAGE_TEXT for a80
+set linesize 500
+set pages 50
+select * from v\$instance;
+!echo "Below is Database Mode"
+select open_mode from v\$database;
+
+!echo "Below are UNDO Tablespace usage"
+col allocated for 999,999.999
+col free      for 999,999.999
+col used      for 999,999.999
+
+select
+    ( select sum(bytes)/1024/1024 from dba_data_files
+       where tablespace_name like 'UND%' )  allocated,
+    ( select sum(bytes)/1024/1024 from dba_free_space
+       where tablespace_name like 'UND%')  free,
+    ( select sum(bytes)/1024/1024 from dba_undo_extents
+       where tablespace_name like 'UND%') USed
+from dual
+/
+
+!echo "Below are long running transactions"
+
+select t.inst_id,t.start_time,s.sid,s.serial#,s.username,s.process,s.machine
+from gv\$transaction t, gv\$session s
+where s.saddr = t.ses_addr
+and s.inst_id = t.inst_id order by 2;
+
+
+!echo "Below are Temp Tablespace Usage"
+SET PAGESIZE 60
+SET LINESIZE 300
+
+SELECT
+   A.tablespace_name tablespace,
+   D.mb_total,
+   SUM (A.used_blocks * D.block_size) / 1024 / 1024 mb_used,
+   D.mb_total - SUM (A.used_blocks * D.block_size) / 1024 / 1024 mb_free
+FROM
+   v\$sort_segment A,
+(
+SELECT
+   B.name,
+   C.block_size,
+   SUM (C.bytes) / 1024 / 1024 mb_total
+FROM
+   v\$tablespace B,
+   v\$tempfile C
+WHERE
+   B.ts#= C.ts#
+GROUP BY
+   B.name,
+   C.block_size
+) D
+WHERE
+   A.tablespace_name = D.name
+GROUP by
+   A.tablespace_name,
+   D.mb_total
+/
+
+!echo "Below are current running SQL"
+
+col sid_serial format a16
+col sql_text format a42
+col prl format a4
+break on inst_id
+WITH sess AS (SELECT /*+ <dm_perf.cursql> materialize */ gvs.sid, gvs.sql_id, gvs.sql_child_number, gvs.paddr, gvs.inst_id, gvs.machine, gvs.osuser, gvs.process,
+              gvs.serial#, (sysdate-gvs.sql_exec_start)*24*60*60 as elapsed_seconds, (select count (*) from gv\$px_session gvps where gvps.qcsid = gvs.sid and gvps.qcsid != gvps.sid) as parallel_count
+              FROM gv\$session gvs WHERE (gvs.status = 'ACTIVE' AND gvs.sid NOT IN (SELECT gvps.sid FROM gv\$px_session gvps where gvps.sid != gvps.qcsid /* Exclude parallel slaves */))
+                                 OR gvs.sid IN (SELECT gvps.sid FROM gv\$px_session gvps WHERE gvps.sid = gvps.qcsid /* Include parallel coordinator */)),
+     proc AS (SELECT /*+ <dm_perf.cursql> materialize */ spid, addr, inst_id FROM gv\$process),
+     sql AS (SELECT /*+ <dm_perf.cursql> materialize */ sql_id, sql_text, child_number, inst_id FROM gv\$sql where users_executing > 0)
+SELECT /* <dm_perf.cursql> */ substr(sess.inst_id, 1, 4) as inst, substr(sess.machine,1,30) as machine, substr(sess.osuser, 1, 10) as os_user,
+       substr(sess.process, 1, 15) as process, substr(proc.spid,1,6) as spid,
+       ''''||sess.sid||','||sess.serial#||',@'||sess.inst_id||'''' as sid_serial, decode(sess.parallel_count, 0, null, 'px'||sess.parallel_count) as prl,
+       elapsed_seconds as elapsed, substr(sql.sql_id, 1, 13) as sql_id,
+       substr(sql.sql_text, 1, 42) as sql_text
+FROM sess, proc, sql
+WHERE sess.sql_id = sql.sql_id
+      and sess.sql_child_number = sql.child_number
+      and sess.inst_id = sql.inst_id
+      and sess.paddr = proc.addr
+      and sess.inst_id = proc.inst_id
+      and sql.sql_text not like '%dm_perf%'
+ORDER BY elapsed_seconds desc, sess.inst_id;
+
+!echo "Check Below for any Block Corruption"
+COLUMN owner FORMAT A20
+COLUMN segment_name FORMAT A30
+
+SELECT DISTINCT owner, segment_name
+FROM   v\$database_block_corruption dbc
+       JOIN dba_extents e ON dbc.file# = e.file_id AND dbc.block# BETWEEN e.block_id and e.block_id+e.blocks-1
+ORDER BY 1,2;
+
+!echo "Below are CPU Usage by Oracle User"
+select
+   ss.username,
+   se.SID,
+   VALUE/100 cpu_usage_seconds
+from
+   v\$session ss,
+   v\$sesstat se,
+   v\$statname sn
+where
+   se.STATISTIC# = sn.STATISTIC#
+and
+   NAME like '%CPU used by this session%'
+and
+   se.SID = ss.SID
+and
+   ss.status='ACTIVE'
+and
+   ss.username is not null
+order by VALUE desc;
+
+@alert_log_b.sql
+ENDSQL
+cat /home/oracle/TEST_${DB_SID}.log
+#exit 0;
+
+
+}
+
+
+function OPTION1_FUN1
+{
+echo -e "##TOP 10 PROCESS list## \n " ##Your script or sql to execute###
+###Top ten process
+sudo ps -eo pid,ppid,cmd,%mem,%cpu --sort=-%mem | head
+#for i in $(top -b -n 1 | grep -A 10 "PID USER" | grep -v "PID USER" | awk '{print $1}'); do ps -p $i -f; done
+
+######check for latest kernal version##########
+sleep 1
+
+echo -e  "## Checking kernal now ## \n"
+sleep 1
+a="2.6.32-696.30.1.el6.x86_64"
+b=$(uname -r)
+
+if [ "$b" == "$a" ]
+then
+        echo -e "Kernal version is uptodate \n"
+else
+        echo -e "!!WARNING!! Please update your kernal follow
+ \n"
+fi
+
+
+
+sleep 1
+###Check /var/log/messages file for any error #########
+echo -e "## Checking any kernal log messages for error ## \n"
+sleep 1
+log_msg=$(sudo tail -300 /var/log/messages | grep -i error)
+if [[ $log_msg != "" ]];
+then
+        echo -e "### Below are the kernal logs
+$log_msg ### \n\n"
+else
+        echo -e  "### We are good with kernal logs ## \n"
+fi
+
+###Check filesystem for greater then 85% utilization#####
+echo "filesystem above 85% USAGE"
+sleep 1
+filesys=$(df -h | awk '0+$5 >= 85 {print}')
+if [[ $filesys != "" ]];
+then
+        echo -e "Below FileSystem need to be looked
+$filesys\n"
+else
+        echo "We are good with FileSystem"
+fi
+
+##CPU cores #####
+sleep 1
+echo "Below are deatiled info of CPU cores"
+sleep .5
+cpu_core=$(sudo /usr/local/bin/report_processor_info.sh)
+if [[ $cpu_core != "" ]];
+then
+        echo -e "Detail information of CPU cores
+$cpu_core \n"
+else
+        echo "No info found for cpu check with UNIX team"
+fi
+
+##hugepages calculation######
+HT=$(sudo awk '/HugePages_Total/ {print $2}' /proc/meminfo)
+HF=$(sudo awk '/HugePages_Free/ {print $2}' /proc/meminfo)
+HR=$(sudo awk '/HugePages_Rsvd/ {print $2}' /proc/meminfo)
+HP=$(sudo awk '/Hugepagesize/ {print $2}' /proc/meminfo)
+z=0
+GB=$((($HT*2) / 1024))
+if
+        [[ "$HT" == "$z" ]];
+then
+        echo -e "\n\n ### Hugepages not set ### \n\n"
+else
+        echo -e "value of hugepages in GB is
+$GB"
+fi
+
+####Hugepages Free ###
+if
+        [[ "$HF" == "$z" ]];
+then
+        echo "There is no hugepages free"
+else
+        echo "value of free hugepages is
+$HF"
+fi
+
+#####Hugepages reserverd ####
+
+if
+        [[ "$HR" = "$z" ]];
+then
+        echo "There is no reserved hugepages"
+else
+        echo "value of free hugepages is
+$HR"
+fi
+
+#####Hugepage Size #####
+if
+        [[ HP = 0 ]];
+then
+        echo "check your hugepages it is not set"
+else
+        echo "hugepages size  is
+$HP"
+fi
+
+}
+while true; do
+echo "What you want to do Today?"
+cat << topics
+1)OS_CHECK
+2)Database_CHECK
+3)Network_Check
+4)SAN_CHECK
+5)Quit
+topics
+echo -n "Make your choice: "
+read topic
+##call your function here
+case $topic in
+1)
+echo -e  "\n\n ##Below are OS_CHECKS## \n\n"
+##Call the function for OS_CHECK##
+OPTION1_FUN1;;
+
+2)
+        echo -e  "\n\n ##Below are Database_CHECK"
+OPTION2_FUN2;;
+
+3)
+        echo -e  "\n\n ##Below are Network_Check"
+OPTION3_FUN3;;
+
+4)
+echo -e  "\n\n ##Below are SAN_CHECK"
+OPTION4_FUN4;;
+
+5)
+        echo  "you choosed to quit "
+OPTION5_FUN5;;
+
+*) echo "invalid option";;
+
+esac
+done
